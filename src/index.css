@@ -1,0 +1,179 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------------------------------------------------------------------------
+   Design tokens.
+
+   Light is the base definition; dark is redefined twice — once under the OS
+   preference (guarded so an explicit light choice still wins) and once under
+   the theme toggle, so the toggle beats the OS in both directions.
+
+   Series colours come from the validated categorical palette. The ordering is
+   the colourblind-safety mechanism, not decoration: assign slots in order and
+   never cycle past slot 8.
+--------------------------------------------------------------------------- */
+
+:root {
+  color-scheme: light;
+
+  --surface-1: #fcfcfb;
+  --surface-sunken: #f9f9f7;
+  --surface-raised: #ffffff;
+
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+
+  --border: rgba(11, 11, 11, 0.1);
+  --gridline: #e1e0d9;
+  --baseline: #c3c2b7;
+
+  --series-1: #2a78d6; /* blue */
+  --series-2: #eb6834; /* orange */
+  --series-3: #1baf7a; /* aqua */
+  --series-4: #eda100; /* yellow */
+  --series-5: #e87ba4; /* magenta */
+  --series-6: #008300; /* green */
+  --series-7: #4a3aa7; /* violet */
+  --series-8: #e34948; /* red */
+
+  --brand-soft: #cde2fb;
+
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+
+  --delta-up: #006300;
+  --delta-down: #d03b3b;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme='light'])) {
+    color-scheme: dark;
+
+    --surface-1: #1a1a19;
+    --surface-sunken: #0d0d0d;
+    --surface-raised: #232322;
+
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+
+    --border: rgba(255, 255, 255, 0.1);
+    --gridline: #2c2c2a;
+    --baseline: #383835;
+
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #008300;
+    --series-7: #9085e9;
+    --series-8: #e66767;
+
+    --brand-soft: #184f95;
+
+    --delta-up: #0ca30c;
+    --delta-down: #e66767;
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --surface-1: #1a1a19;
+  --surface-sunken: #0d0d0d;
+  --surface-raised: #232322;
+
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
+
+  --border: rgba(255, 255, 255, 0.1);
+  --gridline: #2c2c2a;
+  --baseline: #383835;
+
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+
+  --brand-soft: #184f95;
+
+  --delta-up: #0ca30c;
+  --delta-down: #e66767;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-surface-sunken text-ink antialiased;
+    font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  }
+
+  /* Large standalone figures use proportional numerals; only columns that must
+     align vertically get tabular figures. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--series-1);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-card border border-line bg-surface;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn text-white;
+    background-color: var(--series-1);
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    filter: brightness(0.92);
+  }
+
+  .btn-ghost {
+    @apply btn border border-line text-ink-secondary hover:bg-surface-sunken;
+  }
+
+  .input {
+    @apply w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-muted;
+  }
+
+  .input:focus {
+    @apply outline-none;
+    border-color: var(--series-1);
+    box-shadow: 0 0 0 3px var(--brand-soft);
+  }
+}
+
+/* Recharts paints its own surfaces; keep them on our tokens. */
+.recharts-cartesian-grid line {
+  stroke: var(--gridline);
+}
+
+.recharts-cartesian-axis-line,
+.recharts-cartesian-axis-tick-line {
+  stroke: var(--baseline);
+}
