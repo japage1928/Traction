@@ -1,6 +1,6 @@
 import { authenticate, serviceClient } from './_shared/supabase.js';
 import { error, json, withErrorHandling } from './_shared/http.js';
-import { canReadProfile, collectMetrics, getProvider } from './_shared/providers.js';
+import { PROVIDERS, canReadProfile, collectMetrics, getProvider } from './_shared/providers.js';
 import { ensureFreshTokens, loadTokens } from './_shared/tokens.js';
 import type { Platform } from '../../shared/types.js';
 
@@ -21,6 +21,27 @@ interface AccountRow {
   platform: Platform;
   handle: string;
   scopes: string[] | null;
+  needs_reauth_since: string | null;
+}
+
+/**
+ * True when the failure means the grant itself is gone — revoked at the
+ * provider, expired beyond refresh, or missing locally. These cannot be fixed
+ * by retrying, only by the user reconnecting, so the connection is parked in
+ * `needs_reauthorization` rather than retried on every sync.
+ */
+function isAuthorizationFailure(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes('responded 401') ||
+    lower.includes('responded 403') ||
+    lower.includes('token refresh failed') ||
+    lower.includes('no stored credentials') ||
+    lower.includes('no refresh token') ||
+    lower.includes('reconnect') ||
+    lower.includes('invalid_grant') ||
+    lower.includes('invalid_token')
+  );
 }
 
 interface SyncResult {
@@ -43,9 +64,11 @@ export default withErrorHandling(async (req: Request) => {
 
   const { data: accounts, error: accountsError } = await db
     .from('social_accounts')
-    .select('id, platform, handle, scopes')
+    .select('id, platform, handle, scopes, needs_reauth_since')
     .eq('user_id', auth.userId)
-    .eq('is_active', true);
+    // A connection parked in needs_reauthorization is skipped until the user
+    // reconnects; retrying a revoked grant just burns rate limit.
+    .in('status', ['connected', 'error']);
 
   if (accountsError) throw new Error(accountsError.message);
   if (!accounts?.length) {
@@ -116,6 +139,9 @@ export default withErrorHandling(async (req: Request) => {
           last_synced_at: new Date().toISOString(),
           last_sync_status: 'success',
           last_sync_error: failed.length ? failed.map((f) => `${f.label}: ${f.message}`).join('; ').slice(0, 500) : null,
+          status: 'connected',
+          status_detail: null,
+          needs_reauth_since: null,
           handle: profile.handle,
           display_name: profile.displayName ?? null,
           avatar_url: profile.avatarUrl ?? null,
@@ -133,9 +159,21 @@ export default withErrorHandling(async (req: Request) => {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[sync] ${account.platform}/${account.handle}:`, message);
 
+      const needsReauth = isAuthorizationFailure(message);
+      const provider = PROVIDERS[account.platform];
+
       await db
         .from('social_accounts')
-        .update({ last_sync_status: 'error', last_sync_error: message.slice(0, 500) })
+        .update({
+          last_sync_status: 'error',
+          last_sync_error: message.slice(0, 500),
+          status: needsReauth ? 'needs_reauthorization' : 'error',
+          status_detail: needsReauth
+            ? `${provider?.label ?? account.platform} access is no longer valid. Reconnect the account to resume.`
+            : 'The last sync did not complete. Traction will try again.',
+          // Preserve the original timestamp across repeated failures.
+          ...(needsReauth ? { needs_reauth_since: account.needs_reauth_since ?? new Date().toISOString() } : {}),
+        })
         .eq('id', account.id);
 
       results.push({

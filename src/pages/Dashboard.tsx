@@ -108,7 +108,7 @@ export function Dashboard() {
       {noAccounts && (
         <Banner tone="info" className="mt-4">
           No accounts connected yet.{' '}
-          <Link to="/accounts" className="font-medium underline">
+          <Link to="/account" className="font-medium underline">
             Connect one
           </Link>{' '}
           and Traction can start tracking what’s working.

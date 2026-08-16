@@ -15,7 +15,7 @@ Built on **Netlify** (static frontend + serverless functions), **Supabase** (Pos
 | **Dashboard** | Follower growth, reach and interaction, headline KPIs with period-over-period deltas, and the queue of next actions. |
 | **Advisor** | Streaming chat that reads your real metrics, connected accounts, recent posts, and current trends before answering — and can write tasks straight into your queue. |
 | **Trends** | Scans the live web for what's moving on each platform, scored and filtered against the niche in your settings. |
-| **Accounts** | OAuth 2.0 connections to X, LinkedIn, Reddit, YouTube, Instagram, and TikTok. Read-only scopes; Traction never sees your password and never posts for you. |
+| **Account** | Your profile plus OAuth 2.0 connections to X, TikTok, and Pinterest (LinkedIn, Reddit, YouTube, and Instagram also supported). Read-only scopes; Traction never sees your password and never posts for you. |
 | **Daily briefing** | One-click read on where things stand plus three to five queued tasks. |
 
 ---
@@ -35,7 +35,28 @@ npm install
 Create a project at [supabase.com/dashboard](https://supabase.com/dashboard). In the SQL editor, run:
 
 1. `supabase/migrations/0001_init.sql` — tables, row-level security, and the signup trigger.
-2. `supabase/seed_demo.sql` — optional, adds the demo-data helpers.
+2. `supabase/migrations/0002_add_pinterest.sql` — **run on its own and let it commit.** Postgres will not let a newly added enum value be used in the transaction that created it.
+3. `supabase/migrations/0003_connections_and_metadata.sql` — connection lifecycle states, account metadata, hardened policies.
+4. `supabase/seed_demo.sql` — optional, adds the demo-data helpers.
+
+Then confirm the isolation guarantees hold on your own database:
+
+```
+supabase/tests/rls_isolation.sql
+```
+
+It creates two throwaway users, asserts that neither can read or modify the other's profile, connections, tokens, metrics, or tasks — including by guessing a primary key — and deletes the fixtures. It raises on the first failure.
+
+### Email delivery
+
+Email verification and password reset both send mail. Supabase's built-in SMTP is rate-limited to a few messages per hour and is only meant for development — configure your own SMTP provider under **Authentication → Emails** before real users sign up, or verification emails will silently stop arriving.
+
+Add these to **Authentication → URL Configuration → Redirect URLs**, or the links in those emails will be rejected:
+
+```
+https://YOUR-SITE.netlify.app/login
+https://YOUR-SITE.netlify.app/update-password
+```
 
 ### 3. Configure the environment
 
@@ -86,22 +107,29 @@ All scopes requested are read-only. Traction cannot post, comment, message, vote
 
 Each platform needs its own OAuth app, registered once by whoever operates the deployment. All are optional and independent — a platform with no credentials configured shows as unavailable on the Accounts page and everything else keeps working.
 
-Register this redirect URI with every provider, substituting your origin and the platform slug:
+**X, TikTok, and Pinterest** each have their own handler and use a clean path:
+
+```
+https://YOUR-SITE.netlify.app/api/oauth/SLUG/callback
+```
+
+**LinkedIn, Reddit, YouTube, and Instagram** share the generic handler:
 
 ```
 https://YOUR-SITE.netlify.app/.netlify/functions/oauth-callback?platform=SLUG
 ```
 
-Locally, use `http://localhost:8888`.
+Locally, use `http://localhost:8888`. The redirect URI is sent both at authorize time and again at token exchange, so it has to match what you registered byte for byte — including the query string on the generic form.
 
 | Platform | Slug | Where to register | Env vars | PKCE |
 |---|---|---|---|:--:|
 | X | `x` | [developer.x.com](https://developer.x.com) | `X_CLIENT_ID`, `X_CLIENT_SECRET` | ✅ |
+| TikTok | `tiktok` | [developers.tiktok.com/apps](https://developers.tiktok.com/apps) — Login Kit v2 | `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET` | ✅ |
+| Pinterest | `pinterest` | [developers.pinterest.com/apps](https://developers.pinterest.com/apps) — API v5 | `PINTEREST_CLIENT_ID`, `PINTEREST_CLIENT_SECRET` | ✅ |
 | LinkedIn | `linkedin` | [linkedin.com/developers/apps](https://www.linkedin.com/developers/apps) | `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET` | — |
 | Reddit | `reddit` | [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps) — type "web app" | `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET` | — |
 | YouTube | `youtube` | [Google Cloud Console](https://console.cloud.google.com/apis/credentials) — enable YouTube Data API v3 | `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET` | ✅ |
 | Instagram | `instagram` | [developers.facebook.com/apps](https://developers.facebook.com/apps) — add the Instagram product, use Instagram Login | `INSTAGRAM_CLIENT_ID`, `INSTAGRAM_CLIENT_SECRET` | — |
-| TikTok | `tiktok` | [developers.tiktok.com/apps](https://developers.tiktok.com/apps) — Login Kit v2 | `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET` | ✅ |
 
 PKCE is used wherever the provider supports it. Reddit, LinkedIn, and Instagram do not document support for it; those flows are still protected by the signed-state check described below.
 
@@ -115,6 +143,9 @@ PKCE is used wherever the provider supports it. Reddit, LinkedIn, and Instagram 
 | YouTube | `youtube.readonly` | Read channel details and statistics |
 | Instagram | `instagram_business_basic`, `instagram_business_manage_insights` | Read profile, media list, insights |
 | TikTok | `user.info.basic`, `user.info.profile`, `user.info.stats` | Read profile and follower statistics |
+| Pinterest | `user_accounts:read` | Read account details and follower counts |
+
+Nothing write-shaped is requested. Publishing, scheduling, replying, and media upload each need scopes Traction deliberately does not ask for yet — they are recorded per platform in `futureCapabilities` (see `netlify/functions/_shared/providers.ts`) so they can be turned on when the feature actually ships, rather than being requested speculatively now. `npm run check:oauth` fails the build if a write scope ever creeps into a request.
 
 ### Platform-specific notes
 

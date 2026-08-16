@@ -9,6 +9,8 @@ import {
   buildAuthorizeUrl,
   collectMetrics,
   canReadProfile,
+  redirectUri,
+  DEDICATED_ROUTE_PLATFORMS,
   type ProviderDefinition,
 } from '../netlify/functions/_shared/providers.js';
 import {
@@ -84,7 +86,7 @@ console.log('\n3. Authorize URLs');
       q.get('response_type') === 'code' &&
       q.get('state') === 'STATE123' &&
       q.get(provider.clientIdParam) === `test-${provider.platform}-id` &&
-      q.get('redirect_uri') === `https://traction.example/.netlify/functions/oauth-callback?platform=${provider.platform}`;
+      q.get('redirect_uri') === redirectUri(provider.platform);
     check(`${provider.label}: core params`, ok, url.search.slice(0, 120));
 
     const scopeParam = q.get('scope') ?? '';
@@ -178,6 +180,64 @@ console.log('\n5. Token envelope');
     rejected = true;
   }
   check('tampered ciphertext is rejected by the auth tag', rejected);
+}
+
+console.log('\n6. Route split and redirect URIs');
+{
+  for (const provider of Object.values(PROVIDERS) as ProviderDefinition[]) {
+    const uri = redirectUri(provider.platform);
+    if (DEDICATED_ROUTE_PLATFORMS.has(provider.platform)) {
+      check(
+        `${provider.label}: dedicated callback route`,
+        uri === `https://traction.example/api/oauth/${provider.platform}/callback`,
+        uri,
+      );
+    } else {
+      check(
+        `${provider.label}: generic callback route`,
+        uri === `https://traction.example/.netlify/functions/oauth-callback?platform=${provider.platform}`,
+        uri,
+      );
+    }
+    // A redirect URI must never carry anything secret.
+    check(`${provider.label}: redirect URI carries no secret`, !uri.includes('secret'));
+  }
+
+  check('X, TikTok and Pinterest all have dedicated routes',
+    ['x', 'tiktok', 'pinterest'].every((p) => DEDICATED_ROUTE_PLATFORMS.has(p as never)));
+}
+
+console.log('\n7. Scope minimisation');
+{
+  for (const provider of Object.values(PROVIDERS) as ProviderDefinition[]) {
+    // Identity scopes must actually be requested, or the connection cannot work.
+    check(
+      `${provider.label}: profile scopes are a subset of requested scopes`,
+      provider.profileScopes.every((s) => provider.scopes.includes(s)),
+      `profile=${provider.profileScopes} requested=${provider.scopes}`,
+    );
+
+    // Nothing write-shaped may be requested at this stage.
+    const writeish = provider.scopes.filter((s) =>
+      /write|publish|upload|manage_comments|submit|\bpost\b/.test(s),
+    );
+    check(`${provider.label}: requests no write scopes`, writeish.length === 0, writeish.join(', '));
+
+    // Future capabilities are documented but must NOT be requested yet.
+    const leaked = provider.futureCapabilities
+      .flatMap((c) => c.scopes)
+      .filter((s) => provider.scopes.includes(s) && !provider.profileScopes.includes(s));
+    const unexpected = leaked.filter((s) => !['tweet.read'].includes(s));
+    check(
+      `${provider.label}: future-capability scopes are not requested`,
+      unexpected.length === 0,
+      unexpected.join(', '),
+    );
+  }
+
+  check('Pinterest requests exactly one scope',
+    PROVIDERS.pinterest.scopes.length === 1 && PROVIDERS.pinterest.scopes[0] === 'user_accounts:read',
+    PROVIDERS.pinterest.scopes.join(','));
 }
 
 console.log(failures === 0 ? '\nAll checks passed.\n' : `\n${failures} CHECK(S) FAILED\n`);

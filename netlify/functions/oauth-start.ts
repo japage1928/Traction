@@ -1,55 +1,37 @@
-import { authenticate } from './_shared/supabase.js';
-import { error, json, withErrorHandling, readJson } from './_shared/http.js';
-import { buildAuthorizeUrl, getProvider, isConfigured } from './_shared/providers.js';
-import { createNonce, createPkcePair, encodeState, serializeCookie } from './_shared/oauth-state.js';
-import { hasEncryptionKey } from './_shared/crypto.js';
-import type { Platform } from '../../shared/types.js';
+import { error, readJson, withErrorHandling } from './_shared/http.js';
+import { handleStart } from './_shared/oauth-flow.js';
+import { DEDICATED_ROUTE_PLATFORMS } from './_shared/providers.js';
+import { PLATFORMS, type Platform } from '../../shared/types.js';
 
 /**
  * POST /.netlify/functions/oauth-start
  * Body: { platform, returnTo? }
  *
- * Returns the provider's authorize URL and parks the PKCE verifier in a signed
- * cookie. The browser then navigates to `url`.
+ * Generic entry point for the platforms that do not have a dedicated handler
+ * (LinkedIn, Reddit, YouTube, Instagram). X, TikTok, and Pinterest are served
+ * by their own functions at /api/oauth/<platform>/start; this rejects them so
+ * there is exactly one path per platform and no ambiguity about which redirect
+ * URI was used.
  */
 export default withErrorHandling(async (req: Request) => {
-  if (req.method !== 'POST') return error('Method not allowed', 405);
-
-  const auth = await authenticate(req);
-  if (!auth) return error('Not signed in', 401);
-
-  if (!hasEncryptionKey()) {
-    return error(
-      'TOKEN_ENCRYPTION_KEY is not configured, so account tokens cannot be stored securely. ' +
-        'Set it before connecting accounts.',
-      503,
-    );
-  }
-
   const body = await readJson<{ platform?: string; returnTo?: string }>(req);
-  if (!body?.platform) return error('A platform is required.', 400);
+  const platform = body?.platform;
 
-  const provider = getProvider(body.platform);
-  if (!isConfigured(provider)) {
-    return error(
-      `${provider.label} is not configured on this deployment. Set ${provider.clientIdEnv} and ${provider.clientSecretEnv}.`,
-      503,
-    );
+  if (!platform) return error('A platform is required.', 400);
+  if (!PLATFORMS.includes(platform as Platform)) {
+    return error(`Unsupported platform: ${platform}`, 400);
+  }
+  if (DEDICATED_ROUTE_PLATFORMS.has(platform as Platform)) {
+    return error(`Use /api/oauth/${platform}/start for ${platform}.`, 400);
   }
 
-  const nonce = createNonce();
-  const pkce = provider.usesPkce ? createPkcePair() : undefined;
-
-  const state = encodeState({
-    userId: auth.userId,
-    platform: provider.platform as Platform,
-    nonce,
-    codeVerifier: pkce?.verifier,
-    returnTo: body.returnTo ?? '/accounts',
-    issuedAt: Date.now(),
-  });
-
-  const url = buildAuthorizeUrl(provider, state, pkce?.challenge);
-
-  return json({ url }, 200, { 'set-cookie': serializeCookie(state) });
+  // handleStart re-reads the body, so hand it a request with an intact stream.
+  return handleStart(
+    platform as Platform,
+    new Request(req.url, {
+      method: req.method,
+      headers: req.headers,
+      body: JSON.stringify({ returnTo: body?.returnTo }),
+    }),
+  );
 });

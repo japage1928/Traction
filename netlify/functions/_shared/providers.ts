@@ -64,16 +64,39 @@ export interface MetricSource {
   fetch: (ctx: FetchContext) => Promise<Partial<ProviderMetrics>>;
 }
 
+/**
+ * A capability Traction does not have yet, and the scopes it would require.
+ *
+ * Recorded rather than requested. Asking for publishing permission before
+ * anything can publish trains users to grant more than the product uses, and
+ * makes the consent screen misrepresent what the app does. When a capability
+ * ships, move its scopes into the provider's `scopes` array and prompt the
+ * affected users to re-authorize.
+ */
+export interface FutureCapability {
+  capability: 'read_analytics' | 'create_drafts' | 'publish' | 'schedule' | 'reply' | 'media_upload';
+  scopes: string[];
+  /** False when the platform's public API genuinely cannot do this. */
+  supportedByPlatform: boolean;
+  note?: string;
+}
+
 export interface ProviderDefinition {
   platform: Platform;
   label: string;
   authorizeUrl: string;
   tokenUrl: string;
   revokeUrl?: string;
-  /** Read-only scopes requested at authorize time. */
+  /**
+   * Read-only scopes actually requested at authorize time. Kept to the minimum
+   * the product uses today: identity, plus the reads the dashboard already
+   * renders. Anything speculative belongs in `futureCapabilities` instead.
+   */
   scopes: string[];
-  /** Scopes required just to identify the account. */
+  /** Subset of `scopes` required just to identify the account. */
   profileScopes: string[];
+  /** Documented, deliberately NOT requested. See FutureCapability. */
+  futureCapabilities: FutureCapability[];
   usesPkce: boolean;
   /** Send client credentials as HTTP Basic on the token endpoint. */
   usesBasicAuth: boolean;
@@ -137,6 +160,23 @@ const x: ProviderDefinition = {
   clientIdEnv: 'X_CLIENT_ID',
   clientSecretEnv: 'X_CLIENT_SECRET',
   permissionSummary: 'Read your profile and public post metrics. Cannot post, like, or follow.',
+  futureCapabilities: [
+    { capability: 'publish', scopes: ['tweet.write'], supportedByPlatform: true },
+    { capability: 'reply', scopes: ['tweet.write'], supportedByPlatform: true },
+    { capability: 'media_upload', scopes: ['media.write'], supportedByPlatform: true },
+    {
+      capability: 'read_analytics',
+      scopes: ['tweet.read'],
+      supportedByPlatform: true,
+      note: 'Per-post organic impressions require a paid X API tier; the free tier exposes public metrics only.',
+    },
+    {
+      capability: 'schedule',
+      scopes: [],
+      supportedByPlatform: false,
+      note: 'X has no scheduling endpoint. Traction would hold the queue and post at the target time.',
+    },
+  ],
   async fetchProfile(accessToken) {
     const data = await getJson(
       'https://api.x.com/2/users/me?user.fields=public_metrics,profile_image_url,username,name',
@@ -191,6 +231,16 @@ const reddit: ProviderDefinition = {
   // `duration=permanent` is what makes Reddit issue a refresh token at all.
   extraAuthorizeParams: { duration: 'permanent' },
   permissionSummary: 'Read your username, karma, and post history. Cannot post, vote, or comment.',
+  futureCapabilities: [
+    { capability: 'publish', scopes: ['submit'], supportedByPlatform: true },
+    { capability: 'reply', scopes: ['submit'], supportedByPlatform: true },
+    {
+      capability: 'schedule',
+      scopes: [],
+      supportedByPlatform: false,
+      note: 'Reddit has no scheduling endpoint; Traction would hold the queue itself.',
+    },
+  ],
   async fetchProfile(accessToken) {
     const u = await getJson('https://oauth.reddit.com/api/v1/me', accessToken);
     return {
@@ -239,6 +289,19 @@ const youtube: ProviderDefinition = {
   // Google only issues a refresh token when both of these are present.
   extraAuthorizeParams: { access_type: 'offline', prompt: 'consent' },
   permissionSummary: 'Read your channel details and public statistics. Cannot upload, edit, or delete.',
+  futureCapabilities: [
+    {
+      capability: 'publish',
+      scopes: ['https://www.googleapis.com/auth/youtube.upload'],
+      supportedByPlatform: true,
+    },
+    {
+      capability: 'read_analytics',
+      scopes: ['https://www.googleapis.com/auth/yt-analytics.readonly'],
+      supportedByPlatform: true,
+      note: 'Watch time and traffic sources need the YouTube Analytics API, a separate scope.',
+    },
+  ],
   async fetchProfile(accessToken) {
     const data = await getJson(
       'https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true',
@@ -303,6 +366,15 @@ const linkedin: ProviderDefinition = {
   clientIdEnv: 'LINKEDIN_CLIENT_ID',
   clientSecretEnv: 'LINKEDIN_CLIENT_SECRET',
   permissionSummary: 'Read your name, headline, and profile photo. Cannot post or message.',
+  futureCapabilities: [
+    { capability: 'publish', scopes: ['w_member_social'], supportedByPlatform: true },
+    {
+      capability: 'read_analytics',
+      scopes: ['r_organization_social'],
+      supportedByPlatform: true,
+      note: 'Requires LinkedIn partner approval for the Community Management API.',
+    },
+  ],
   async fetchProfile(accessToken) {
     const u = await getJson('https://api.linkedin.com/v2/userinfo', accessToken);
     return {
@@ -362,6 +434,10 @@ const instagram: ProviderDefinition = {
   clientIdEnv: 'INSTAGRAM_CLIENT_ID',
   clientSecretEnv: 'INSTAGRAM_CLIENT_SECRET',
   permissionSummary: 'Read your profile, media list, and insights. Cannot post, comment, or send messages.',
+  futureCapabilities: [
+    { capability: 'publish', scopes: ['instagram_business_content_publish'], supportedByPlatform: true },
+    { capability: 'reply', scopes: ['instagram_business_manage_comments'], supportedByPlatform: true },
+  ],
 
   async postExchange(tokens) {
     // Swap the 1-hour token for a 60-day one before we ever store it.
@@ -468,6 +544,16 @@ const tiktok: ProviderDefinition = {
   clientIdEnv: 'TIKTOK_CLIENT_KEY',
   clientSecretEnv: 'TIKTOK_CLIENT_SECRET',
   permissionSummary: 'Read your profile and follower statistics. Cannot post videos or read your inbox.',
+  futureCapabilities: [
+    { capability: 'publish', scopes: ['video.publish'], supportedByPlatform: true },
+    { capability: 'media_upload', scopes: ['video.upload'], supportedByPlatform: true },
+    {
+      capability: 'read_analytics',
+      scopes: ['video.list'],
+      supportedByPlatform: true,
+      note: 'Per-video metrics come from the video list endpoint.',
+    },
+  ],
 
   async fetchProfile(accessToken) {
     const data = await getJson(
@@ -508,6 +594,81 @@ const tiktok: ProviderDefinition = {
 };
 
 // ---------------------------------------------------------------------------
+// Pinterest — OAuth 2.0 + PKCE (API v5)
+//
+// `user_accounts:read` covers both identity and the follower/pin counts the
+// dashboard shows, so no second scope is needed to reach parity with the other
+// platforms. Pinterest publishes no token-revocation endpoint, so disconnect
+// deletes locally and tells the user to finish in Pinterest's own settings.
+// ---------------------------------------------------------------------------
+
+const PINTEREST_API = 'https://api.pinterest.com/v5';
+
+const pinterest: ProviderDefinition = {
+  platform: 'pinterest',
+  label: 'Pinterest',
+  authorizeUrl: 'https://www.pinterest.com/oauth/',
+  tokenUrl: `${PINTEREST_API}/oauth/token`,
+  scopes: ['user_accounts:read'],
+  profileScopes: ['user_accounts:read'],
+  usesPkce: true,
+  // Pinterest expects the client credentials as HTTP Basic on /oauth/token.
+  usesBasicAuth: true,
+  clientIdParam: 'client_id',
+  scopeSeparator: ',',
+  clientIdEnv: 'PINTEREST_CLIENT_ID',
+  clientSecretEnv: 'PINTEREST_CLIENT_SECRET',
+  permissionSummary: 'Read your account details and follower counts. Cannot create pins or boards.',
+  futureCapabilities: [
+    { capability: 'publish', scopes: ['pins:write', 'boards:write'], supportedByPlatform: true },
+    {
+      capability: 'read_analytics',
+      scopes: ['pins:read', 'boards:read'],
+      supportedByPlatform: true,
+      note: 'Per-pin impressions and saves come from the pin analytics endpoints.',
+    },
+    {
+      capability: 'schedule',
+      scopes: [],
+      supportedByPlatform: false,
+      note: 'Pinterest has no scheduling endpoint on the public v5 API.',
+    },
+  ],
+
+  async fetchProfile(accessToken) {
+    const u = await getJson(`${PINTEREST_API}/user_account`, accessToken);
+    // v5 returns `username` reliably; `id` only on some account types.
+    const externalId = u.id ?? u.username;
+    if (!externalId) throw new Error('Pinterest returned no account identifier.');
+    return {
+      externalId: String(externalId),
+      handle: u.username,
+      displayName: u.business_name || u.username,
+      avatarUrl: u.profile_image,
+      profileUrl: u.username ? `https://pinterest.com/${u.username}` : undefined,
+    };
+  },
+
+  metricSources: [
+    {
+      id: 'audience',
+      label: 'Follower and pin counts',
+      scopes: ['user_accounts:read'],
+      async fetch({ accessToken }) {
+        const u = await getJson(`${PINTEREST_API}/user_account`, accessToken);
+        return {
+          followers: u.follower_count ?? 0,
+          following: u.following_count ?? 0,
+          postsCount: u.pin_count ?? 0,
+          // v5 reports rolling 30-day impressions on the account object.
+          impressions: u.monthly_views ?? 0,
+        };
+      },
+    },
+  ],
+};
+
+// ---------------------------------------------------------------------------
 
 export const PROVIDERS: Record<Platform, ProviderDefinition> = {
   x,
@@ -516,6 +677,7 @@ export const PROVIDERS: Record<Platform, ProviderDefinition> = {
   linkedin,
   instagram,
   tiktok,
+  pinterest,
 };
 
 export function getProvider(platform: string): ProviderDefinition {
@@ -528,8 +690,21 @@ export function isConfigured(provider: ProviderDefinition): boolean {
   return Boolean(process.env[provider.clientIdEnv] && process.env[provider.clientSecretEnv]);
 }
 
+/**
+ * Platforms with their own start/callback handlers, reached at the clean
+ * `/api/oauth/<platform>/…` paths. Everything else shares the generic pair.
+ */
+export const DEDICATED_ROUTE_PLATFORMS = new Set<Platform>(['x', 'tiktok', 'pinterest']);
+
+/**
+ * The redirect URI sent at authorize time and again at token exchange. Both
+ * must match what is registered in the platform's developer console exactly —
+ * byte for byte, including the query string on the generic form.
+ */
 export function redirectUri(platform: Platform): string {
-  return `${appUrl()}/.netlify/functions/oauth-callback?platform=${platform}`;
+  return DEDICATED_ROUTE_PLATFORMS.has(platform)
+    ? `${appUrl()}/api/oauth/${platform}/callback`
+    : `${appUrl()}/.netlify/functions/oauth-callback?platform=${platform}`;
 }
 
 /** Splits a provider's scope string on whitespace or commas. */

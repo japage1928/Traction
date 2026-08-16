@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 
 export function Login() {
@@ -10,6 +11,10 @@ export function Login() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [params] = useSearchParams();
+
+  // Set by the confirmation link's redirect target.
+  const justVerified = params.get('verified') === '1';
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -21,8 +26,12 @@ export function Login() {
       if (mode === 'signin') {
         await signIn(email, password);
       } else {
-        await signUp(email, password, displayName || email.split('@')[0]);
-        setNotice('Account created. Check your inbox if your project has email confirmation switched on.');
+        const { needsVerification } = await signUp(email, password, displayName || email.split('@')[0]);
+        setNotice(
+          needsVerification
+            ? `Account created. We sent a confirmation link to ${email} — click it to activate your account.`
+            : 'Account created. Signing you in…',
+        );
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong.');
@@ -77,6 +86,11 @@ export function Login() {
             />
           </Field>
 
+          {justVerified && mode === 'signin' && !notice && (
+            <p className="text-sm" style={{ color: 'var(--delta-up)' }}>
+              Email confirmed. Sign in to continue.
+            </p>
+          )}
           {error && (
             <p className="text-sm" style={{ color: 'var(--status-critical)' }} role="alert">
               {error}
@@ -88,17 +102,28 @@ export function Login() {
             {busy ? 'Working…' : mode === 'signin' ? 'Sign in' : 'Create account'}
           </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              setMode(mode === 'signin' ? 'signup' : 'signin');
-              setError(null);
-              setNotice(null);
-            }}
-            className="w-full text-center text-xs text-ink-secondary hover:text-ink"
-          >
-            {mode === 'signin' ? 'No account yet? Create one' : 'Already have an account? Sign in'}
-          </button>
+          <div className="space-y-2">
+            <button
+              type="button"
+              onClick={() => {
+                setMode(mode === 'signin' ? 'signup' : 'signin');
+                setError(null);
+                setNotice(null);
+              }}
+              className="w-full text-center text-xs text-ink-secondary hover:text-ink"
+            >
+              {mode === 'signin' ? 'No account yet? Create one' : 'Already have an account? Sign in'}
+            </button>
+
+            {mode === 'signin' && (
+              <Link
+                to="/forgot-password"
+                className="block w-full text-center text-xs text-ink-muted hover:text-ink"
+              >
+                Forgot your password?
+              </Link>
+            )}
+          </div>
         </form>
       </div>
     </div>

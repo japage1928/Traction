@@ -3,7 +3,7 @@
  * Keep this file dependency-free so both runtimes can import it.
  */
 
-export const PLATFORMS = ['x', 'linkedin', 'reddit', 'youtube', 'instagram', 'tiktok'] as const;
+export const PLATFORMS = ['x', 'linkedin', 'reddit', 'youtube', 'instagram', 'tiktok', 'pinterest'] as const;
 export type Platform = (typeof PLATFORMS)[number];
 
 export const PLATFORM_LABELS: Record<Platform, string> = {
@@ -13,9 +13,28 @@ export const PLATFORM_LABELS: Record<Platform, string> = {
   youtube: 'YouTube',
   instagram: 'Instagram',
   tiktok: 'TikTok',
+  pinterest: 'Pinterest',
 };
 
 export type SyncStatus = 'pending' | 'running' | 'success' | 'error';
+
+/**
+ * Lifecycle of a social connection, distinct from sync health.
+ *
+ *  - connected            working
+ *  - needs_reauthorization the grant is gone (revoked, expired, scope removed);
+ *                          only the user can fix it, by reconnecting
+ *  - error                 transient trouble; retrying may succeed
+ *  - disconnected          retained for history, no live credentials
+ */
+export type ConnectionStatus = 'connected' | 'needs_reauthorization' | 'error' | 'disconnected';
+
+export const CONNECTION_STATUS_LABELS: Record<ConnectionStatus, string> = {
+  connected: 'Connected',
+  needs_reauthorization: 'Needs reauthorization',
+  error: 'Connection error',
+  disconnected: 'Disconnected',
+};
 export type TaskStatus = 'suggested' | 'accepted' | 'done' | 'dismissed';
 export type TaskEffort = 'quick' | 'medium' | 'deep';
 
@@ -44,6 +63,19 @@ export interface SocialAccount {
   last_sync_status: SyncStatus;
   last_sync_error: string | null;
   is_active: boolean;
+  status: ConnectionStatus;
+  /** User-facing explanation. Never carries tokens, secrets, or raw API bodies. */
+  status_detail: string | null;
+  needs_reauth_since: string | null;
+  last_authorized_at: string | null;
+}
+
+/** Non-sensitive platform detail, safe to render in the browser. */
+export interface SocialAccountMetadata {
+  account_id: string;
+  platform: Platform;
+  data: Record<string, unknown>;
+  captured_at: string;
 }
 
 export interface AccountMetric {

@@ -2,20 +2,26 @@ import { authenticate, serviceClient } from './_shared/supabase.js';
 import { error, json, readJson, withErrorHandling } from './_shared/http.js';
 import { getProvider, revokeToken } from './_shared/providers.js';
 import { loadTokens } from './_shared/tokens.js';
+import { userFacingError } from './_shared/oauth-flow.js';
 
 /**
  * POST /.netlify/functions/disconnect
  * Body: { accountId }
  *
- * Revokes the grant at the provider, then deletes the local account row —
- * which cascades to the stored tokens.
+ * Order of operations matters, and each step is deliberate:
  *
- * The order matters. Deleting our row first would leave a live token sitting
- * at the provider with nothing left to revoke it with, so the user would think
- * they had disconnected while the authorization was still standing. Revocation
- * is still best-effort: if the provider rejects the call we say so, delete
- * locally anyway, and point the user at their platform settings, because
- * refusing to disconnect would be worse than a stale grant they can clear.
+ *  1. Revoke at the provider FIRST. Deleting our copy first would strand a
+ *     live token with nothing left to revoke it with, so the user would
+ *     believe they had disconnected while the grant still stood.
+ *  2. Hard-delete the stored tokens. Nothing usable is left behind.
+ *  3. Mark the connection `disconnected` rather than deleting the row —
+ *     `account_metrics` cascades from it, so deleting would silently destroy
+ *     the user's entire analytics history. Reconnecting the same account
+ *     revives the row and the history with it.
+ *
+ * Revocation is best-effort: if the provider refuses we say so plainly and
+ * still complete steps 2 and 3, because refusing to disconnect would leave the
+ * user worse off than a stale grant they can clear in platform settings.
  */
 export default withErrorHandling(async (req: Request) => {
   if (req.method !== 'POST') return error('Method not allowed', 405);
@@ -28,11 +34,11 @@ export default withErrorHandling(async (req: Request) => {
 
   const db = serviceClient();
 
-  // Scope the lookup to the caller so one user cannot disconnect another's
-  // account by guessing an id.
+  // Scoped to the caller, so a guessed or manipulated id resolves to nothing
+  // rather than to somebody else's connection.
   const { data: account, error: lookupError } = await db
     .from('social_accounts')
-    .select('id, platform, handle, scopes')
+    .select('id, platform, handle, scopes, status')
     .eq('id', body.accountId)
     .eq('user_id', auth.userId)
     .maybeSingle();
@@ -40,35 +46,60 @@ export default withErrorHandling(async (req: Request) => {
   if (lookupError) throw new Error(lookupError.message);
   if (!account) return error('Account not found.', 404);
 
+  const provider = getProvider(account.platform);
   let revoked = false;
-  let revocationNote: string | null = null;
+  let note: string | null = null;
 
+  // --- 1. Revoke at the provider -------------------------------------------
   try {
-    const provider = getProvider(account.platform);
     const tokens = await loadTokens(db, account.id, account.scopes ?? []);
 
     if (!tokens) {
-      revocationNote = 'No stored token was found, so there was nothing to revoke.';
+      note = 'No stored credentials were found, so there was nothing to revoke.';
     } else if (!provider.revokeUrl && !provider.revoke) {
-      revocationNote = `${provider.label} does not offer a revocation endpoint. Remove Traction from your ${provider.label} app settings to fully withdraw access.`;
+      note =
+        `${provider.label} does not publish a token revocation endpoint. Traction has deleted its copy of your ` +
+        `credentials — to fully withdraw access, also remove Traction in your ${provider.label} account settings.`;
     } else {
       await revokeToken(provider, tokens);
       revoked = true;
     }
   } catch (err) {
-    revocationNote =
-      `Could not revoke the token at the provider: ${err instanceof Error ? err.message : String(err)}. ` +
-      'The account has been disconnected here — remove Traction in your platform settings to be certain.';
     console.error('[disconnect] revocation failed', err);
+    note =
+      `${userFacingError(err, provider)} Traction has deleted its copy of your credentials, but you should also ` +
+      `remove Traction in your ${provider.label} account settings to be certain.`;
   }
 
-  const { error: deleteError } = await db
-    .from('social_accounts')
+  // --- 2. Destroy the stored credentials -----------------------------------
+  const { error: tokenDeleteError } = await db
+    .from('social_account_tokens')
     .delete()
+    .eq('account_id', account.id);
+
+  if (tokenDeleteError) throw new Error(tokenDeleteError.message);
+
+  // --- 3. Retire the connection, keeping analytics history ------------------
+  const { error: updateError } = await db
+    .from('social_accounts')
+    .update({
+      status: 'disconnected',
+      status_detail: revoked
+        ? `Disconnected. ${provider.label} revoked Traction's access.`
+        : 'Disconnected. Stored credentials were deleted.',
+      needs_reauth_since: null,
+      last_sync_error: null,
+    })
     .eq('id', account.id)
     .eq('user_id', auth.userId);
 
-  if (deleteError) throw new Error(deleteError.message);
+  if (updateError) throw new Error(updateError.message);
 
-  return json({ disconnected: true, revoked, note: revocationNote });
+  return json({
+    disconnected: true,
+    revoked,
+    note,
+    // Metrics collected while connected survive; only credentials are gone.
+    historyPreserved: true,
+  });
 });

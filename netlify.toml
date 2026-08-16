@@ -15,6 +15,42 @@
   port = 8888
   autoLaunch = false
 
+# Clean OAuth routes. Each platform gets its own start/callback handler so
+# platform quirks have somewhere to live and one platform's bug cannot break
+# another's flow. status 200 rewrites rather than redirects, so the browser and
+# the provider both see the registered URL unchanged.
+#
+# These MUST come before the SPA fallback below — the first matching rule wins.
+[[redirects]]
+  from = "/api/oauth/x/start"
+  to = "/.netlify/functions/oauth-x-start"
+  status = 200
+
+[[redirects]]
+  from = "/api/oauth/x/callback"
+  to = "/.netlify/functions/oauth-x-callback"
+  status = 200
+
+[[redirects]]
+  from = "/api/oauth/tiktok/start"
+  to = "/.netlify/functions/oauth-tiktok-start"
+  status = 200
+
+[[redirects]]
+  from = "/api/oauth/tiktok/callback"
+  to = "/.netlify/functions/oauth-tiktok-callback"
+  status = 200
+
+[[redirects]]
+  from = "/api/oauth/pinterest/start"
+  to = "/.netlify/functions/oauth-pinterest-start"
+  status = 200
+
+[[redirects]]
+  from = "/api/oauth/pinterest/callback"
+  to = "/.netlify/functions/oauth-pinterest-callback"
+  status = 200
+
 # SPA fallback — every non-asset, non-function path serves the app shell.
 [[redirects]]
   from = "/*"

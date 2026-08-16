@@ -51,10 +51,35 @@ export async function getProviderStatus(): Promise<{
   return res.json();
 }
 
-/** Kicks off an OAuth connect by navigating to the provider. */
-export async function connectAccount(platform: Platform, returnTo = '/accounts'): Promise<void> {
-  const { url } = await post<{ url: string }>('oauth-start', { platform, returnTo });
-  window.location.href = url;
+/**
+ * Platforms with their own start/callback handlers, reached at the clean
+ * `/api/oauth/<platform>/…` paths. Must stay in step with
+ * DEDICATED_ROUTE_PLATFORMS on the server — the redirect URI is derived from
+ * the same split, and a mismatch would fail the token exchange.
+ */
+const DEDICATED_ROUTE_PLATFORMS: Platform[] = ['x', 'tiktok', 'pinterest'];
+
+/**
+ * Kicks off an OAuth connect by navigating to the provider.
+ *
+ * The browser never sees a client secret: it asks our server for an authorize
+ * URL, and the server signs the state and sets the PKCE cookie before handing
+ * back a URL that contains only public parameters.
+ */
+export async function connectAccount(platform: Platform, returnTo = '/account'): Promise<void> {
+  const dedicated = DEDICATED_ROUTE_PLATFORMS.includes(platform);
+
+  const res = await fetch(dedicated ? `/api/oauth/${platform}/start` : `${BASE}/oauth-start`, {
+    method: 'POST',
+    headers: await authHeaders(),
+    body: JSON.stringify(dedicated ? { returnTo } : { platform, returnTo }),
+    credentials: 'same-origin',
+  });
+
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(payload.error ?? `Could not start the ${platform} connection (${res.status}).`);
+
+  window.location.href = payload.url;
 }
 
 export interface SyncResult {
