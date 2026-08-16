@@ -1,28 +1,26 @@
 import { authenticate, serviceClient } from './_shared/supabase.js';
 import { error, json, withErrorHandling } from './_shared/http.js';
-import { getProvider, refreshAccessToken } from './_shared/providers.js';
-import { decryptToken, encryptToken } from './_shared/crypto.js';
+import { canReadProfile, collectMetrics, getProvider } from './_shared/providers.js';
+import { ensureFreshTokens, loadTokens } from './_shared/tokens.js';
 import type { Platform } from '../../shared/types.js';
 
 /**
  * POST /.netlify/functions/sync
  *
- * Pulls a fresh metrics snapshot for every active account the caller owns and
- * writes one row per account per day. Individual account failures are recorded
- * on the account and reported back, but do not abort the run — one revoked
- * token should not block the rest of the dashboard from updating.
+ * Pulls a fresh metrics snapshot for every active account the caller owns.
+ *
+ * Only the metric sources whose scopes the user actually granted are called —
+ * a partial consent produces partial data rather than an unauthorized request.
+ * Individual account failures are recorded on the account and reported back
+ * but never abort the run: one revoked token should not stop the rest of the
+ * dashboard from updating.
  */
 
 interface AccountRow {
   id: string;
   platform: Platform;
   handle: string;
-}
-
-interface TokenRow {
-  access_token_enc: string;
-  refresh_token_enc: string | null;
-  expires_at: string | null;
+  scopes: string[] | null;
 }
 
 interface SyncResult {
@@ -31,6 +29,8 @@ interface SyncResult {
   handle: string;
   ok: boolean;
   message?: string;
+  /** Capabilities the user did not authorize, so the UI can explain the gap. */
+  skipped?: Array<{ label: string; missingScopes: string[] }>;
 }
 
 export default withErrorHandling(async (req: Request) => {
@@ -43,13 +43,13 @@ export default withErrorHandling(async (req: Request) => {
 
   const { data: accounts, error: accountsError } = await db
     .from('social_accounts')
-    .select('id, platform, handle')
+    .select('id, platform, handle, scopes')
     .eq('user_id', auth.userId)
     .eq('is_active', true);
 
   if (accountsError) throw new Error(accountsError.message);
   if (!accounts?.length) {
-    return json({ results: [], message: 'No connected accounts to sync.' });
+    return json({ results: [], synced: 0, failed: 0, message: 'No connected accounts to sync.' });
   }
 
   const { data: run } = await db
@@ -64,38 +64,32 @@ export default withErrorHandling(async (req: Request) => {
   for (const account of accounts as AccountRow[]) {
     try {
       const provider = getProvider(account.platform);
+      const grantedScopes = account.scopes ?? [];
 
-      const { data: tokenRow, error: tokenError } = await db
-        .from('social_account_tokens')
-        .select('access_token_enc, refresh_token_enc, expires_at')
-        .eq('account_id', account.id)
-        .single();
+      const stored = await loadTokens(db, account.id, grantedScopes);
+      if (!stored) throw new Error('No stored credentials. Reconnect this account.');
 
-      if (tokenError || !tokenRow) {
-        throw new Error('No stored credentials. Reconnect this account.');
+      const tokens = await ensureFreshTokens(db, provider, account.id, stored);
+
+      if (!canReadProfile(provider, grantedScopes)) {
+        throw new Error(
+          `This connection is missing the ${provider.profileScopes.join(', ')} scope. Reconnect and accept the requested permissions.`,
+        );
       }
 
-      const stored = tokenRow as TokenRow;
-      let accessToken = decryptToken(stored.access_token_enc);
+      const profile = await provider.fetchProfile(tokens.accessToken);
+      const { metrics, skipped, failed } = await collectMetrics(
+        provider,
+        tokens.accessToken,
+        profile,
+        grantedScopes,
+      );
 
-      // Refresh a minute before nominal expiry to absorb clock skew.
-      const expiresAt = stored.expires_at ? new Date(stored.expires_at).getTime() : null;
-      if (expiresAt && expiresAt - Date.now() < 60_000) {
-        if (!stored.refresh_token_enc) {
-          throw new Error('Access token expired and no refresh token is available. Reconnect.');
-        }
-        const refreshed = await refreshAccessToken(provider, decryptToken(stored.refresh_token_enc));
-        accessToken = refreshed.accessToken;
-        await db.from('social_account_tokens').update({
-          access_token_enc: encryptToken(refreshed.accessToken),
-          refresh_token_enc: refreshed.refreshToken ? encryptToken(refreshed.refreshToken) : stored.refresh_token_enc,
-          expires_at: refreshed.expiresAt?.toISOString() ?? null,
-          updated_at: new Date().toISOString(),
-        }).eq('account_id', account.id);
+      // A source that was authorized but errored is a real problem; a source
+      // that was never authorized is expected and only worth reporting.
+      if (failed.length && failed.length === provider.metricSources.length - skipped.length) {
+        throw new Error(failed.map((f) => `${f.label}: ${f.message}`).join('; '));
       }
-
-      const profile = await provider.fetchProfile(accessToken);
-      const metrics = await provider.fetchMetrics(accessToken, profile);
 
       const { error: metricsError } = await db.from('account_metrics').upsert(
         {
@@ -121,14 +115,20 @@ export default withErrorHandling(async (req: Request) => {
         .update({
           last_synced_at: new Date().toISOString(),
           last_sync_status: 'success',
-          last_sync_error: null,
+          last_sync_error: failed.length ? failed.map((f) => `${f.label}: ${f.message}`).join('; ').slice(0, 500) : null,
           handle: profile.handle,
           display_name: profile.displayName ?? null,
           avatar_url: profile.avatarUrl ?? null,
         })
         .eq('id', account.id);
 
-      results.push({ accountId: account.id, platform: account.platform, handle: account.handle, ok: true });
+      results.push({
+        accountId: account.id,
+        platform: account.platform,
+        handle: account.handle,
+        ok: true,
+        skipped: skipped.map((s) => ({ label: s.label, missingScopes: s.missingScopes })),
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[sync] ${account.platform}/${account.handle}:`, message);

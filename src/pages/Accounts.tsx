@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { supabase } from '@/lib/supabase';
-import { connectAccount, getProviderStatus, syncAccounts, type ProviderStatus } from '@/lib/api';
+import {
+  connectAccount,
+  disconnectAccount,
+  getProviderStatus,
+  syncAccounts,
+  type ProviderStatus,
+} from '@/lib/api';
 import { PageHeader, Section, Banner, Spinner } from '@/components/ui';
 import { formatRelative } from '@/lib/format';
 import { PLATFORM_LABELS, type SocialAccount } from '@shared/types';
@@ -14,6 +20,7 @@ export function Accounts() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -40,11 +47,10 @@ export function Accounts() {
   // The OAuth callback redirects back here with a result flag.
   const connectResult = params.get('connect');
   const connectReason = params.get('reason');
+  const partialScopes = params.get('partial');
 
   function dismissResult() {
-    params.delete('connect');
-    params.delete('reason');
-    params.delete('platform');
+    ['connect', 'reason', 'platform', 'partial'].forEach((k) => params.delete(k));
     setParams(params, { replace: true });
   }
 
@@ -60,14 +66,27 @@ export function Accounts() {
   }
 
   async function handleDisconnect(account: SocialAccount) {
-    if (!confirm(`Disconnect ${PLATFORM_LABELS[account.platform]} @${account.handle}? Historical metrics are kept.`)) {
+    const label = PLATFORM_LABELS[account.platform];
+    if (
+      !confirm(
+        `Disconnect ${label} @${account.handle}?\n\n` +
+          `Traction will ask ${label} to revoke its access. Metrics already collected are kept.`,
+      )
+    ) {
       return;
     }
+
     setBusy(account.id);
+    setError(null);
+    setNotice(null);
     try {
-      // Deleting the account cascades to its stored tokens.
-      const { error: deleteError } = await supabase.from('social_accounts').delete().eq('id', account.id);
-      if (deleteError) throw new Error(deleteError.message);
+      const result = await disconnectAccount(account.id);
+      setNotice(
+        result.note ??
+          (result.revoked
+            ? `Disconnected. ${label} has revoked Traction's access.`
+            : 'Disconnected.'),
+      );
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not disconnect.');
@@ -91,6 +110,7 @@ export function Accounts() {
 
   const connected = new Set(accounts.map((a) => a.platform));
   const available = providers.filter((p) => !connected.has(p.platform));
+  const providerFor = (platform: string) => providers.find((p) => p.platform === platform);
 
   return (
     <div className="mx-auto max-w-3xl px-5 py-6 md:px-8 md:py-8">
@@ -106,25 +126,47 @@ export function Accounts() {
         }
       />
 
+      <Banner tone="info" className="mt-4">
+        Every connection uses the platform’s own OAuth sign-in. You authorize Traction on their site — we never see
+        your password, and never ask for an API key.
+      </Banner>
+
       {connectResult === 'success' && (
-        <Banner tone="good" className="mt-4">
-          Connected. <button onClick={dismissResult} className="underline">Dismiss</button>
+        <Banner tone={partialScopes ? 'warning' : 'good'} className="mt-3">
+          {partialScopes ? (
+            <>
+              Connected, but some permissions were declined ({partialScopes.split(',').join(', ')}), so parts of the
+              dashboard will stay empty. Reconnect and accept them to fill it in.
+            </>
+          ) : (
+            'Connected.'
+          )}{' '}
+          <button onClick={dismissResult} className="underline">
+            Dismiss
+          </button>
         </Banner>
       )}
       {connectResult === 'error' && (
-        <Banner tone="critical" className="mt-4">
+        <Banner tone="critical" className="mt-3">
           {connectReason ?? 'The connection did not complete.'}{' '}
-          <button onClick={dismissResult} className="underline">Dismiss</button>
+          <button onClick={dismissResult} className="underline">
+            Dismiss
+          </button>
+        </Banner>
+      )}
+      {notice && (
+        <Banner tone="good" className="mt-3">
+          {notice}
         </Banner>
       )}
       {error && (
-        <Banner tone="critical" className="mt-4">
+        <Banner tone="critical" className="mt-3">
           {error}
         </Banner>
       )}
       {!encryptionReady && (
-        <Banner tone="warning" className="mt-4">
-          <code>TOKEN_ENCRYPTION_KEY</code> is not set, so account tokens can’t be stored securely. Connecting is
+        <Banner tone="warning" className="mt-3">
+          <code>TOKEN_ENCRYPTION_KEY</code> is not set, so access tokens can’t be stored securely. Connecting is
           disabled until it is configured.
         </Banner>
       )}
@@ -137,34 +179,52 @@ export function Accounts() {
             <Section title="Connected" subtitle={`${accounts.length} account${accounts.length === 1 ? '' : 's'}`}>
               <ul className="space-y-2">
                 {accounts.map((account) => (
-                  <li key={account.id} className="flex items-center gap-3 rounded-lg border border-line p-3">
-                    {account.avatar_url ? (
-                      <img src={account.avatar_url} alt="" className="h-9 w-9 shrink-0 rounded-full object-cover" />
-                    ) : (
-                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-surface-sunken text-xs font-medium text-ink-secondary">
-                        {PLATFORM_LABELS[account.platform].slice(0, 2)}
-                      </div>
-                    )}
+                  <li key={account.id} className="rounded-lg border border-line p-3">
+                    <div className="flex items-center gap-3">
+                      {account.avatar_url ? (
+                        <img src={account.avatar_url} alt="" className="h-9 w-9 shrink-0 rounded-full object-cover" />
+                      ) : (
+                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-surface-sunken text-xs font-medium text-ink-secondary">
+                          {PLATFORM_LABELS[account.platform].slice(0, 2)}
+                        </div>
+                      )}
 
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-medium text-ink">
-                        {account.display_name ?? account.handle}
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm font-medium text-ink">
+                          {account.display_name ?? account.handle}
+                        </div>
+                        <div className="truncate text-xs text-ink-muted">
+                          {PLATFORM_LABELS[account.platform]} · @{account.handle}
+                        </div>
                       </div>
-                      <div className="truncate text-xs text-ink-muted">
-                        {PLATFORM_LABELS[account.platform]} · @{account.handle}
-                      </div>
+
+                      <SyncBadge account={account} />
+
+                      <button
+                        type="button"
+                        className="btn-ghost shrink-0 text-xs"
+                        onClick={() => void handleDisconnect(account)}
+                        disabled={busy !== null}
+                      >
+                        {busy === account.id ? 'Revoking…' : 'Disconnect'}
+                      </button>
                     </div>
 
-                    <SyncBadge account={account} />
-
-                    <button
-                      type="button"
-                      className="btn-ghost shrink-0 text-xs"
-                      onClick={() => void handleDisconnect(account)}
-                      disabled={busy !== null}
-                    >
-                      Disconnect
-                    </button>
+                    {account.scopes?.length > 0 && (
+                      <div className="mt-2.5 border-t border-line pt-2.5">
+                        <div className="text-xs text-ink-muted">
+                          <span className="font-medium text-ink-secondary">You authorized: </span>
+                          {account.scopes.join(', ')}
+                        </div>
+                        {!providerFor(account.platform)?.canRevoke && (
+                          <div className="mt-1 text-xs text-ink-muted">
+                            {PLATFORM_LABELS[account.platform]} has no revocation endpoint — disconnecting here removes
+                            the token, but also remove Traction in your {PLATFORM_LABELS[account.platform]} settings to
+                            fully withdraw access.
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -173,32 +233,50 @@ export function Accounts() {
 
           <Section
             title={accounts.length ? 'Add another' : 'Connect your first account'}
-            subtitle="Only read access is requested — Traction never posts on your behalf."
+            subtitle="Read-only access, requested through each platform’s official OAuth flow."
           >
             {available.length === 0 ? (
               <p className="py-6 text-center text-sm text-ink-muted">Everything available is already connected.</p>
             ) : (
               <ul className="space-y-2">
                 {available.map((provider) => (
-                  <li key={provider.platform} className="flex items-center gap-3 rounded-lg border border-line p-3">
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm font-medium text-ink">{provider.label}</div>
-                      {provider.configured ? (
-                        <div className="truncate text-xs text-ink-muted">{provider.scopes.join(', ')}</div>
-                      ) : (
-                        <div className="text-xs text-ink-muted">
-                          Not configured on this deployment. Set {provider.missingEnv.join(' and ')}.
+                  <li key={provider.platform} className="rounded-lg border border-line p-3">
+                    <div className="flex items-start gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium text-ink">{provider.label}</span>
+                          {provider.usesPkce && (
+                            <span
+                              className="rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-ink-muted"
+                              style={{ backgroundColor: 'var(--surface-sunken)' }}
+                              title="Authorization code is bound to a one-time verifier that never leaves the server."
+                            >
+                              PKCE
+                            </span>
+                          )}
                         </div>
-                      )}
+
+                        {provider.configured ? (
+                          <>
+                            <p className="mt-1 text-xs text-ink-secondary">{provider.permissionSummary}</p>
+                            <p className="mt-1 text-xs text-ink-muted">Scopes: {provider.scopes.join(', ')}</p>
+                          </>
+                        ) : (
+                          <p className="mt-1 text-xs text-ink-muted">
+                            Not configured on this deployment. Set {provider.missingEnv.join(' and ')}.
+                          </p>
+                        )}
+                      </div>
+
+                      <button
+                        type="button"
+                        className="btn-ghost shrink-0 text-xs"
+                        disabled={!provider.configured || !encryptionReady || busy !== null}
+                        onClick={() => void handleConnect(provider.platform)}
+                      >
+                        {busy === provider.platform ? 'Redirecting…' : 'Connect'}
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      className="btn-ghost shrink-0 text-xs"
-                      disabled={!provider.configured || !encryptionReady || busy !== null}
-                      onClick={() => void handleConnect(provider.platform)}
-                    >
-                      {busy === provider.platform ? 'Redirecting…' : 'Connect'}
-                    </button>
                   </li>
                 ))}
               </ul>

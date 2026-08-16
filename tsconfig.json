@@ -28,5 +28,5 @@
       "@shared/*": ["shared/*"]
     }
   },
-  "include": ["src", "netlify/functions", "shared", "vite.config.ts"]
+  "include": ["src", "netlify/functions", "shared", "scripts", "vite.config.ts"]
 }

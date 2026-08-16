@@ -34,6 +34,10 @@ export interface ProviderStatus {
   label: string;
   configured: boolean;
   scopes: string[];
+  /** Plain-language description of what the user is consenting to. */
+  permissionSummary: string;
+  usesPkce: boolean;
+  canRevoke: boolean;
   missingEnv: string[];
 }
 
@@ -59,10 +63,22 @@ export interface SyncResult {
   handle: string;
   ok: boolean;
   message?: string;
+  /** Capabilities skipped because the user did not grant their scopes. */
+  skipped?: Array<{ label: string; missingScopes: string[] }>;
 }
 
 export function syncAccounts(): Promise<{ results: SyncResult[]; synced: number; failed: number }> {
   return post('sync');
+}
+
+/**
+ * Revokes the grant at the provider and removes the account. `note` carries an
+ * explanation when revocation could not be completed.
+ */
+export function disconnectAccount(
+  accountId: string,
+): Promise<{ disconnected: boolean; revoked: boolean; note: string | null }> {
+  return post('disconnect', { accountId });
 }
 
 // --- AI ---------------------------------------------------------------------

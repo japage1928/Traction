@@ -1,8 +1,8 @@
 import { serviceClient } from './_shared/supabase.js';
 import { appUrl, withErrorHandling } from './_shared/http.js';
-import { exchangeCodeForToken, getProvider } from './_shared/providers.js';
+import { canReadProfile, exchangeCodeForToken, getProvider } from './_shared/providers.js';
 import { clearCookie, decodeState, readCookie } from './_shared/oauth-state.js';
-import { encryptToken } from './_shared/crypto.js';
+import { saveTokens } from './_shared/tokens.js';
 
 /**
  * GET /.netlify/functions/oauth-callback?platform=…&code=…&state=…
@@ -56,6 +56,18 @@ export default withErrorHandling(async (req: Request) => {
 
   try {
     const tokens = await exchangeCodeForToken(provider, code, state.codeVerifier);
+
+    // The user may have unticked permissions on the consent screen. If what
+    // they granted cannot even identify the account, stop here rather than
+    // storing a token we can do nothing useful with.
+    if (!canReadProfile(provider, tokens.scopes)) {
+      const missing = provider.profileScopes.filter((s) => !tokens.scopes.includes(s));
+      return redirectBack(state.returnTo, {
+        connect: 'error',
+        reason: `Traction needs the ${missing.join(', ')} permission to read your ${provider.label} account. Please reconnect and accept it.`,
+      });
+    }
+
     const profile = await provider.fetchProfile(tokens.accessToken);
 
     const { data: account, error: accountError } = await db
@@ -81,17 +93,16 @@ export default withErrorHandling(async (req: Request) => {
 
     if (accountError) throw new Error(accountError.message);
 
-    const { error: tokenError } = await db.from('social_account_tokens').upsert({
-      account_id: account.id,
-      access_token_enc: encryptToken(tokens.accessToken),
-      refresh_token_enc: tokens.refreshToken ? encryptToken(tokens.refreshToken) : null,
-      expires_at: tokens.expiresAt?.toISOString() ?? null,
-      updated_at: new Date().toISOString(),
+    await saveTokens(db, account.id, tokens);
+
+    // Tell the user when they granted less than we asked for, so a thin
+    // dashboard later has an explanation attached to it now.
+    const declined = provider.scopes.filter((s) => !tokens.scopes.includes(s));
+    return redirectBack(state.returnTo, {
+      connect: 'success',
+      platform: state.platform,
+      ...(declined.length ? { partial: declined.join(',') } : {}),
     });
-
-    if (tokenError) throw new Error(tokenError.message);
-
-    return redirectBack(state.returnTo, { connect: 'success', platform: state.platform });
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     console.error('[oauth-callback]', err);
